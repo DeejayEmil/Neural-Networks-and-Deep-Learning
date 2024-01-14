@@ -1,0 +1,331 @@
+---
+title: "Default Payment Classification dataset using neural networks"
+author: "Emil Gil"
+date: "2023-12-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+# Default Payment Classification dataset using neural networks
+
+This dataset is related to a research study on customer default payments in Taiwan, specifically focusing on the predictive accuracy of default probability using six data mining methods. The main objective is to assess the effectiveness of different techniques in predicting the probability of customers defaulting on their payments. The research also introduces a novel method called the "Classification Smoothing Method" to estimate the actual probability of default, emphasizing the importance of accurate predictions for risk management.
+
+Here are the key components of the dataset:
+
+## Response Variable:
+Default Payment: A binary variable (Yes = 1, No = 0) indicating whether a customer defaulted on their payment.
+
+## Explanatory Variables:
+X1: Amount of credit granted (Taiwanese dollar).
+X2: Gender (1 = male; 2 = female).
+X3: Education (1 = graduate school; 2 = university; 3 = high school; 4 = others).
+X4: Marital status (1 = married; 2 = single; 3 = others).
+X5: Age (years).
+X6 - X11: Previous payment history. Monthly payment records from April to September 2005, with values indicating payment status (e.g., -1 = on-time payment, 1 = one-month delay, etc.).
+X12-X17: Amount of bill statement (Taiwanese dollar) for each month from September 2005 to April 2005.
+X18-X23: Amount of previous payment (Taiwanese dollar) for each month from September 2005 to April 2005.
+
+```{r}
+# First, we load all our libraries and our dataset
+# Load the keras library
+library(keras)
+# Enables reading data from Excel
+library(readxl)
+# Contains a collection of functions for data manipulation operations
+library(dplyr)
+
+# We will use it to assist with one-hot encoding in the input variables
+library(caret)
+data <- read_excel("default of credit card clients.xls")
+head(data)
+```
+
+
+```{r}
+#We can see variables "EDUCATION" and "MARRIAGE" have incorrect values based
+# on the dataset description. Let's delete those incorrect values
+delete <- c(0, 5, 6)
+data <- data[!data$X3 %in% delete, ]
+data <- data[!data$X4 %in% c(0), ]
+
+# We have column names in row 1, let's proceed to replace them...
+colnames(data) <- data[1,]
+# Remove that row
+data <- data[-1,]
+head(data)
+```
+
+We will check if our dataset has any missing data.
+
+```{r}
+apply(data, 2, function(x) length(which(is.na(x))))
+```
+## Data Structure
+
+As we can see below, out data is NOT formatted correctly.
+Despite having numeric and discrete variables, all of them are shown in 'chr',
+which is not correct. The data must be converted to as numeric and as factor 
+as applicable.
+
+```{r}
+str(data)
+```
+```{r}
+#Delete the ID column
+data <- data %>% 
+  select(-ID)
+
+str(data)
+```
+### Handling the data format
+
+```{r}
+
+# Convert discrete data to factor
+data$SEX <- as.factor(data$SEX)
+data$EDUCATION <- as.factor(data$EDUCATION)
+data$MARRIAGE <- as.factor(data$MARRIAGE)
+
+# Convert the rest of the data to numeric
+data %<>% mutate_if(is.character, as.numeric)
+
+# Visualize the structure
+str(data)
+
+```
+
+### Input and target variables
+
+```{r}
+# Separate the target from our input variables
+x <- data[, 1:(ncol(data) - 1)]
+y <- data[, ncol(data)]
+```
+
+## Let's apply one hot codification...
+
+```{r}
+# All variables have to be numeric --> one-hot encoding
+x_fact <- x %>% select_if(is.factor)
+x_num <- x %>% select_if(is.numeric)
+
+ohe <- caret::dummyVars(" ~ .", data = x_fact) # creates a set of dummy variables
+# Convert it to a data.frame
+x_ohe <- data.frame(predict(ohe, newdata = x_fact)) 
+head(x_ohe)
+```
+
+```{r}
+# Concatenate
+x <- cbind(x_num, x_ohe)
+# Convert to a matrix
+x <- as.matrix(x)
+```
+
+Test - Train division
+
+```{r}
+set.seed(321) 
+index <- sample(2, nrow(x), replace = TRUE, prob = c(0.8, 0.2))
+
+# Training
+x_train <- x[index == 1, ]
+y_train <- y[index == 1, ]$`default payment next month`
+
+# Test
+x_test <- x[index == 2, ]
+y_test <- y[index == 2, ]$`default payment next month`
+```
+
+Let's verify our data is evenly distributed
+
+```{r}
+prop.table(table(data[,"default payment next month"])); 
+prop.table(table(y_train))
+prop.table(table(y_test))
+```
+It's not even but that is just the nature of the data 
+as we can see on the original dataset.
+
+## Data normalization 
+
+```{r}
+m <- apply(x_train[,1:20], 2, mean)  # Only numeric columns
+s <- apply(x_train[,1:20], 2, sd) 
+x_train[,1:20] <- scale(x_train[,1:20], center = m, scale = s)
+x_test[,1:20] <- scale(x_test[,1:20], center = m, scale = s) 
+```
+
+## Neural Network Creation
+
+We will use 1 activation layers besides the output layer, the dropout and
+max-norm regulation techniques while building the model and the early stopping 
+technique while fitting the model.
+
+```{r}
+create_model <- function(X, neurons1){
+  
+#Create model
+    model <- keras_model_sequential() %>% 
+      layer_dropout(0.2, input_shape = ncol(x_train)) %>% 
+      layer_dense(units = neurons1, activation = "relu",
+                  kernel_constraint = constraint_maxnorm(3)) %>% 
+      layer_dense(units = 1, activation = 'sigmoid')
+      
+#Compile model    
+    optimizador <- "sgd"
+    
+    model %>% compile(loss = "binary_crossentropy",
+                      optimizer = optimizador,   
+                      metric = c("accuracy")) 
+    
+    # Return created model 
+    return(model)
+}
+```
+
+After the model is created, we train it with the train data.
+
+```{r}
+model <- create_model(x_train, 50) 
+summary(model)
+```
+Applying the early stopping technique while fitting the model.
+This will allow us to fit the model in less time and obtain good results.
+
+```{r}
+history <- model %>% fit(x_train, y_train,
+                          epochs = 50,
+                          batch_size = 16,
+                          validation_split = .2,
+                          callbacks = callback_early_stopping(patience = 10, 
+                                                               monitor = 'val_accuracy', 
+                                                               restore_best_weights = TRUE))
+
+history
+```
+We obtained an accuracy of 0.8115 and validation accuracy of 0.8243 which is 
+relatively good.
+
+Here are the results and the accuracy and loss for the test data.
+
+```{r}
+metrics <- model %>% evaluate(x_test, y_test)
+metrics
+plot(history)
+```
+
+### We can try some other techniques in order to see if our neural network gets better results.
+
+The tfruns library will be used to run different experiments.
+
+```{r}
+library(tfruns)
+
+runs1 <- tuning_run("experimento1.R", runs_dir = "runs_exp1", 
+                   flags = list(dense_units = c(10,25,50,75,100)))
+```
+
+We will now observe the results variations for different scenarios in the 
+first activation layer of our neural network, where the values of 10, 25, 50, 75 and 100
+neurons will be compared.
+
+```{r}
+library(dplyr)
+
+best_results <- runs1 %>% 
+  select(flag_dense_units,metric_accuracy,metric_val_accuracy,epochs_completed) %>% 
+  arrange(desc(metric_val_accuracy))
+best_results
+```
+
+We can see that despite having the lesser amount of units in the activation layer,
+the 10 units run obtained the best results of validation accuracy in the training data.
+Let's see the plotted results.
+
+```{r}
+model <- create_model(x_train, 10) 
+summary(model)
+history <- model %>% fit(x_train, y_train,
+                          epochs = 50,
+                          batch_size = 16,
+                          validation_split = .2,
+                          callbacks = callback_early_stopping(patience = 10, 
+                                                               monitor = 'val_accuracy', 
+                                                               restore_best_weights = TRUE))
+
+plot(history)
+history
+metrics <- model %>% evaluate(x_test, y_test)
+```
+
+
+### We can also try different optimizers and do some new experiments in order to get better results.
+
+```{r}
+
+runs2 <- tuning_run("experimento2.R", runs_dir = "runs_exp2",
+                   flags = list(dense_units = c(10, 50),
+                                optimizers = c("sgd", "adam", "rmsprop"), 
+                                epochs = c(50),
+                                batch_size = c(16)))
+
+```
+
+
+```{r}
+best_results <- runs2 %>% 
+  select(flag_dense_units,flag_optimizers,metric_accuracy,metric_val_accuracy,epochs_completed) %>% 
+  arrange(desc(metric_val_accuracy))
+best_results
+```
+
+In this case the best results were obtained using the 50 units and adam optimizer
+experiment.
+
+Here we can see the plotted results.
+
+```{r}
+model <- keras_model_sequential() %>% 
+  layer_dropout(.2, input_shape = ncol(x_train)) %>% 
+  layer_dense(units = 50, activation = "relu",
+              kernel_constraint = constraint_maxnorm(3)) %>% 
+  layer_dense(units = 1, activation = 'sigmoid')
+
+model %>% compile(loss = "binary_crossentropy",
+                  optimizer = "adam",   
+                  metric = c("accuracy"))
+
+
+history <- model %>% fit(x_train, y_train,
+                         epochs = 50,
+                         batch_size = 16,
+                         validation_split = 0.2)
+
+plot(history)
+```
+
+### Final results and saved model
+```{r}
+#Saved model
+save_model_tf(model, "GILHERNANDEZ")
+
+history
+metrics <- model %>% evaluate(x_test, y_test)
+metrics
+```
+
+## Conclusion
+
+##### There are endless posibilities when it comes to build and train a neural network and since we had a reasonably good dataset, our models reached their peak accuraccy almost inmediately. The accuracy for the validation set was on average 82% and 81% for the test set.
+
+##### In addition to experimenting with different optimizers and activation functions, the incorporation of techniques such as early stopping and dropout has further enriched our exploration of the neural network performance for the Credit Score Classification problem.
+
+##### Early stopping is a regularization technique employed during the training phase. By monitoring the model's performance on a validation set, early stopping allows us to halt the training process when the model's performance starts to degrade, preventing overfitting. This method helps strike a balance between achieving good training accuracy and avoiding the risk of overfitting to the training data.
+
+##### The dropout technique is another regularization method that involves randomly deactivating a certain percentage of neurons during each training iteration. This helps prevent co-adaptation of hidden units and promotes robustness in the model. By introducing dropout layers in our neural network architecture, we have witnessed the positive impact on generalization performance. Dropout has proven to be an effective means of reducing overfitting, particularly in scenarios where the model exhibits high complexity or when working with limited amounts of data.
+
+##### The FLAG function allowed us to make several experiments in order to identify the best and more efficient scenario trying different optimizers and neuron units. However it can be concluded that the best model is not the one with the biggest amount of neurons of that uses and specific optimized.
